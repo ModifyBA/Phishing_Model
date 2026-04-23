@@ -6,6 +6,9 @@ import numpy as np #for handling numerical operations and arrays
 import pandas as pd #for handling dataframes and CSV files
 import lightgbm as lgb 
 
+import matplotlib.pyplot as plt
+import shap
+
 from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
@@ -14,19 +17,29 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     f1_score,
+    roc_curve,
+    precision_recall_curve,
+    ConfusionMatrixDisplay,
 )
 
-from FE import extract_features
+from Feature_Extract import extract_features
 
 #just some file paths for loading/saving data and model
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TRAIN_PATH = os.path.join(BASE_DIR, "clean_train.csv")
-TEST_PATH = os.path.join(BASE_DIR, "clean_test.csv")
-VALIDATION_PATH = os.path.join(BASE_DIR, "clean_valid.csv")
+DATA_DIR = os.path.join(BASE_DIR, "dataset_outputs")
+
+TRAIN_PATH = os.path.join(DATA_DIR, "train.csv")
+VALIDATION_PATH = os.path.join(DATA_DIR, "validation.csv")
+TEST_PATH = os.path.join(DATA_DIR, "test.csv")
 
 MODEL_PATH = os.path.join(BASE_DIR, "lbgm_model.pkl")
 FEATURES_PATH = os.path.join(BASE_DIR, "feature_names.pkl")
 THRESHOLD_PATH = os.path.join(BASE_DIR, "threshold.json")
+ROC_CURVE_PATH = os.path.join(BASE_DIR, "roc_curve.png")
+PR_CURVE_PATH = os.path.join(BASE_DIR, "pr_curve.png")
+CONF_MATRIX_PATH = os.path.join(BASE_DIR, "confusion_matrix.png")
+SHAP_SUMMARY_PATH = os.path.join(BASE_DIR, "shap_summary.png")
+SHAP_BAR_PATH = os.path.join(BASE_DIR, "shap_bar.png")
 
 
 #label cleaning, just in case
@@ -174,6 +187,30 @@ threshold_stats = choose_threshold_with_fpr_budget(y_valid, valid_probs, target_
 best_threshold = threshold_stats["threshold"]
 test_preds = (test_probs >= best_threshold).astype(int) #converts the predicted probabilities into binary predictions based on the threshold (1 for phishing, 0 for benign)  
 
+test_preds = (test_probs >= best_threshold).astype(int)
+
+# =========================================================
+# FALSE POSITIVE ANALYSIS
+# =========================================================
+results_df = test_df.copy()
+
+results_df["y_true"] = y_test
+results_df["y_pred"] = test_preds
+results_df["y_prob"] = test_probs
+
+false_positives = results_df[
+    (results_df["y_true"] == 0) & (results_df["y_pred"] == 1)
+].copy()
+
+true_benign = results_df[
+    (results_df["y_true"] == 0) & (results_df["y_pred"] == 0)
+].copy()
+
+print(f"\nFalse Positives: {len(false_positives)}")
+print("\nSample False Positive URLs:")
+print(false_positives["url"].head(15).to_string())
+print(X_train["domain_freq"].describe())
+
 print("Best threshold:", best_threshold)
 print("Validation ROC-AUC:", roc_auc_score(y_valid, valid_probs))
 print("Validation PR-AUC :", average_precision_score(y_valid, valid_probs))
@@ -195,6 +232,7 @@ importance_df = pd.DataFrame({
     "importance": model.feature_importances_
 }).sort_values("importance", ascending=False)
 
+
 print("\nTop 15 Features:")
 print(importance_df.head(15).to_string(index=False))
 
@@ -213,3 +251,79 @@ with open(THRESHOLD_PATH, "w") as f:
         indent=2
     )
 
+# -----------------------------
+# ROC Curve
+# -----------------------------
+fpr, tpr, _ = roc_curve(y_test, test_probs)
+roc_auc = roc_auc_score(y_test, test_probs)
+
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, label=f"ROC Curve (AUC = {roc_auc:.4f})")
+plt.plot([0, 1], [0, 1], linestyle="--")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve")
+plt.legend(loc="lower right")
+plt.tight_layout()
+plt.savefig(ROC_CURVE_PATH, dpi=300)
+plt.close()
+
+# -----------------------------
+# Precision-Recall Curve
+# -----------------------------
+precision_vals, recall_vals, _ = precision_recall_curve(y_test, test_probs)
+pr_auc = average_precision_score(y_test, test_probs)
+
+plt.figure(figsize=(8, 6))
+plt.plot(recall_vals, precision_vals, label=f"PR Curve (AP = {pr_auc:.4f})")
+plt.xlabel("Recall")
+plt.ylabel("Precision")
+plt.title("Precision-Recall Curve")
+plt.legend(loc="lower left")
+plt.tight_layout()
+plt.savefig(PR_CURVE_PATH, dpi=300)
+plt.close()
+
+# -----------------------------
+# Confusion Matrix Plot
+# -----------------------------
+cm = confusion_matrix(y_test, test_preds)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Legitimate", "Phishing"])
+fig, ax = plt.subplots(figsize=(6, 6))
+disp.plot(ax=ax, values_format="d")
+plt.title("Confusion Matrix")
+plt.tight_layout()
+plt.savefig(CONF_MATRIX_PATH, dpi=300)
+plt.close()
+
+# -----------------------------
+# SHAP Explainability
+# -----------------------------
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_test)
+
+# LightGBM binary classifiers may return a list of arrays
+if isinstance(shap_values, list):
+    shap_values_to_plot = shap_values[1]
+else:
+    shap_values_to_plot = shap_values
+
+# SHAP summary beeswarm
+plt.figure()
+shap.summary_plot(shap_values_to_plot, X_test, show=False)
+plt.tight_layout()
+plt.savefig(SHAP_SUMMARY_PATH, dpi=300, bbox_inches="tight")
+plt.close()
+
+# SHAP bar plot
+plt.figure()
+shap.summary_plot(shap_values_to_plot, X_test, plot_type="bar", show=False)
+plt.tight_layout()
+plt.savefig(SHAP_BAR_PATH, dpi=300, bbox_inches="tight")
+plt.close()
+
+print(f"Saved ROC curve to: {ROC_CURVE_PATH}")
+print(f"Saved PR curve to: {PR_CURVE_PATH}")
+print(f"Saved confusion matrix plot to: {CONF_MATRIX_PATH}")
+print(f"Saved SHAP summary plot to: {SHAP_SUMMARY_PATH}")
+print(f"Saved SHAP bar plot to: {SHAP_BAR_PATH}")
